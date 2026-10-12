@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#05030a">
+<meta name="format-detection" content="telephone=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -14,6 +15,7 @@
   body{touch-action:none;user-select:none;-webkit-user-select:none;
        font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",Arial,sans-serif}
   #stage{position:fixed;inset:0;display:block}
+  #bgm{position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-10px;top:-10px}
   .vignette{position:fixed;inset:0;pointer-events:none;
     background:radial-gradient(circle at 50% 46%,rgba(255,70,130,.12),rgba(0,0,0,0) 58%),
                radial-gradient(circle at 50% 50%,rgba(0,0,0,0) 34%,rgba(0,0,0,.72) 100%)}
@@ -30,6 +32,15 @@
     transition:transform .18s ease,background .25s ease,color .25s ease}
   .sound:active{transform:scale(.9)}
   .sound.off{background:rgba(255,255,255,.06);color:rgba(255,255,255,.42);border-color:rgba(255,255,255,.18)}
+  .sound.need{animation:nudge 1.4s ease-in-out infinite}
+  @keyframes nudge{0%,100%{transform:scale(1);box-shadow:0 0 0 0 rgba(255,90,150,.55)}
+    50%{transform:scale(1.08);box-shadow:0 0 0 14px rgba(255,90,150,0)}}
+  .status{position:fixed;left:12px;top:calc(env(safe-area-inset-top,0px) + 12px);max-width:62%;
+    padding:6px 10px;border-radius:9px;background:rgba(0,0,0,.42);color:rgba(255,225,235,.85);
+    font-size:11px;line-height:1.5;letter-spacing:.02em;pointer-events:none;
+    transition:opacity .5s ease;overflow-wrap:anywhere}
+  .status.hide{opacity:0}
+  .status.err{background:rgba(120,10,40,.55);color:#ffd9e6}
 </style>
 </head>
 <body>
@@ -37,7 +48,9 @@
 <div class="vignette"></div>
 <div class="caption" id="caption"></div>
 <div class="hint" id="hint"></div>
+<div class="status" id="status"></div>
 <div class="sound" id="sound" role="button" aria-label="声音开关">&#128266;</div>
+<audio id="bgm" loop playsinline webkit-playsinline preload="auto"></audio>
 <script id="bgm-data" type="application/octet-stream">
 SUQzBAAAAAAANENPTU0AAAAqAAAAdW5kAHZpZDp2MDMwMGZnMTAwMDBjZTVtbDhiYzc3dWFmMGdnMG9rMAD/+jBkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAABYaW5nAAAABwAAGEsAO3xdAAIFBwoMDxEUFxkcHiEjJigrLjAzNTg6PT9CRUdKTE9RVFdZXF5hY2Zoa25wc3V4en2AgoWHioyPkZSXmZyeoaOm
@@ -43373,7 +43386,8 @@ qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
     beatPeriod: 1.25,                      // 心跳周期（秒）
     interactive: true,                     // 是否开启轻触爆散
     musicVolume: 0.85,                     // 音乐音量 0~1
-    musicFadeIn: 2400                      // 淡入时长（毫秒）
+    musicFadeIn: 2400,                     // 淡入时长（毫秒）
+    showStatus: true                       // 左上角状态提示（排查问题时可留着）
   };
 
   var canvas = document.getElementById('stage');
@@ -43381,6 +43395,8 @@ qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
   var hintEl = document.getElementById('hint');
   var captionEl = document.getElementById('caption');
   var soundBtn = document.getElementById('sound');
+  var statusEl = document.getElementById('status');
+  var el = document.getElementById('bgm');
 
   captionEl.textContent = CONFIG.caption || '';
   hintEl.textContent = CONFIG.hint || '';
@@ -43395,51 +43411,153 @@ qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
   function rand(a, b) { return a + Math.random() * (b - a); }
   function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
 
-  /* ---------- 音乐（内嵌 base64 -> Blob -> 播放） ---------- */
-  var audio = null, musicStarted = false, soundWanted = true, fadeTimer = null;
+  /* ==================== 音乐 ==================== */
+  var soundWanted = true;       // 用户是否想要声音
+  var musicStarted = false;     // 是否已经开始播放过
+  var fadeTimer = null;
+  var gestureTries = 0;
+  var srcMode = 'blob';         // blob -> data 回退
+  var b64Cache = '';
+  var statusTimer = null;
 
-  function buildAudio() {
-    if (audio) return audio;
-    var holder = document.getElementById('bgm-data');
-    if (!holder) return null;
-    var b64 = holder.textContent.replace(/\s+/g, '');
-    if (!b64) return null;
-    try {
-      var bin = atob(b64);
-      var bytes = new Uint8Array(bin.length);
-      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      var url = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }));
-      audio = new Audio();
-      audio.src = url;
-      audio.loop = true;
-      audio.preload = 'auto';
-      audio.volume = 0;
-      audio.load();
-    } catch (e) {
-      audio = null;
-      soundBtn.style.display = 'none';
+  function setStatus(text, kind, sticky) {
+    if (!CONFIG.showStatus) return;
+    if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
+    statusEl.textContent = text || '';
+    statusEl.className = 'status' + (kind === 'err' ? ' err' : '');
+    if (!text) return;
+    if (!sticky) {
+      statusTimer = setTimeout(function () { statusEl.className = 'status hide'; }, 5000);
     }
-    return audio;
+  }
+
+  function fmtTime(s) {
+    if (!isFinite(s) || s <= 0) return '--';
+    var m = Math.floor(s / 60), r = Math.round(s % 60);
+    return m + ':' + (r < 10 ? '0' + r : r);
+  }
+
+  /* 分块解码，避免一次性 atob 巨串在低端机上崩掉 */
+  function decodeEmbedded() {
+    var holder = document.getElementById('bgm-data');
+    if (!holder) throw new Error('缺少音频数据块');
+    var b64 = (holder.textContent || '').replace(/[^A-Za-z0-9+/=]/g, '');
+    if (!b64) throw new Error('音频数据为空');
+    b64Cache = b64;
+    var CH = 262144;
+    var parts = [], total = 0;
+    for (var i = 0; i < b64.length; i += CH) {
+      var bin = atob(b64.substr(i, CH));
+      var u8 = new Uint8Array(bin.length);
+      for (var j = 0; j < bin.length; j++) u8[j] = bin.charCodeAt(j);
+      parts.push(u8);
+      total += u8.length;
+    }
+    var out = new Uint8Array(total), off = 0;
+    for (var k = 0; k < parts.length; k++) { out.set(parts[k], off); off += parts[k].length; }
+    return out;
+  }
+
+  function attachSource(mode) {
+    srcMode = mode;
+    if (mode === 'data') {
+      el.src = 'data:audio/mpeg;base64,' + b64Cache;
+    } else {
+      var bytes = decodeEmbedded();
+      el.src = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }));
+    }
+    el.load();
+  }
+
+  function prepareMusic() {
+    if (el.dataset.prepared === '1') return;
+    el.dataset.prepared = '1';
+    setStatus('音频解码中…', '', true);
+    try {
+      attachSource('blob');
+    } catch (e) {
+      setStatus('解码失败：' + (e && e.message ? e.message : e) + '（文件可能传输不完整）', 'err', true);
+      soundBtn.style.display = 'none';
+      return;
+    }
+    el.addEventListener('loadedmetadata', function () {
+      setStatus('音频已就绪 ' + fmtTime(el.duration) + ' · 轻触屏幕播放', '', false);
+    });
+    el.addEventListener('canplay', function () {
+      if (!musicStarted) setStatus('音频已就绪 ' + fmtTime(el.duration) + ' · 轻触屏幕播放', '', false);
+    });
+    el.addEventListener('playing', function () {
+      setStatus('音乐播放中', '', false);
+      soundBtn.classList.remove('need');
+    });
+    el.addEventListener('pause', function () {
+      if (soundWanted) setStatus('已暂停 · 点右上角继续', '', true);
+    });
+    el.addEventListener('error', function () {
+      var code = el.error ? el.error.code : 0;
+      if (srcMode === 'blob') {
+        setStatus('blob 播放失败，切换内联数据重试…', '', true);
+        try { attachSource('data'); return; } catch (e) {}
+      }
+      var names = { 1: '加载被中断', 2: '网络错误', 3: '解码错误', 4: '格式不支持' };
+      setStatus('音频错误 ' + code + '（' + (names[code] || '未知') + '）', 'err', true);
+      soundBtn.classList.add('need');
+    });
   }
 
   function fadeVolume(target, ms) {
-    if (!audio) return;
-    if (fadeTimer) clearInterval(fadeTimer);
-    if (!ms || ms <= 0) { audio.volume = clamp(target, 0, 1); return; }
-    var from = audio.volume, start = Date.now();
+    if (fadeTimer) { clearInterval(fadeTimer); fadeTimer = null; }
+    if (!ms || ms <= 0) { el.volume = clamp(target, 0, 1); return; }
+    var from = el.volume, start = Date.now();
     fadeTimer = setInterval(function () {
       var k = clamp((Date.now() - start) / ms, 0, 1);
-      audio.volume = clamp(from + (target - from) * k, 0, 1);
+      el.volume = clamp(from + (target - from) * k, 0, 1);
       if (k >= 1) { clearInterval(fadeTimer); fadeTimer = null; }
     }, 40);
   }
 
-  function playMusic() {
-    var a = buildAudio();
-    if (!a) return;
-    var p = a.play();
-    if (p && p.catch) p.catch(function () {});
+  function tryPlay() {
+    if (!soundWanted) return;
+    prepareMusic();
+    if (!el.src) return;
+    var p = el.play();
+    if (p && p.catch) {
+      p.catch(function (err) {
+        var name = (err && err.name) || 'Error';
+        if (name === 'NotAllowedError') {
+          setStatus('浏览器拦截了自动播放 · 请点右上角 🔊', 'err', true);
+          soundBtn.classList.add('need');
+        } else if (name === 'AbortError') {
+          /* 快速连点导致的中断，忽略 */
+        } else {
+          setStatus('播放失败：' + name, 'err', true);
+          soundBtn.classList.add('need');
+        }
+      });
+    }
+  }
+
+  function startMusic() {
+    if (musicStarted) { if (el.paused && soundWanted) tryPlay(); return; }
+    musicStarted = true;
+    tryPlay();
     fadeVolume(CONFIG.musicVolume, CONFIG.musicFadeIn);
+  }
+
+  /* iOS 静音开关 / 音频会话解锁：一次性播放静音缓冲 */
+  function unlockAudioSession() {
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      var ac = new AC();
+      var buf = ac.createBuffer(1, 1, 22050);
+      var src = ac.createBufferSource();
+      src.buffer = buf;
+      src.connect(ac.destination);
+      if (ac.state === 'suspended' && ac.resume) ac.resume();
+      src.start(0);
+      setTimeout(function () { try { ac.close(); } catch (e) {} }, 1500);
+    } catch (e) {}
   }
 
   function setSound(on) {
@@ -43448,14 +43566,28 @@ qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
     if (on) soundBtn.classList.remove('off'); else soundBtn.classList.add('off');
     if (on) {
       musicStarted = true;
-      playMusic();
-    } else if (audio) {
+      tryPlay();
+      fadeVolume(CONFIG.musicVolume, 600);
+    } else {
       if (fadeTimer) { clearInterval(fadeTimer); fadeTimer = null; }
-      audio.pause();
+      try { el.pause(); } catch (e) {}
+      setStatus('已静音', '', false);
+    }
+    if (!on) soundBtn.classList.remove('need');
+  }
+
+  /* 任何一次用户手势都尝试启动（覆盖 pointer/touch/mouse/click/key） */
+  function onAnyGesture(e) {
+    if (e && e.target && soundBtn.contains(e.target)) return;   // 交给按钮自己处理
+    unlockAudioSession();
+    if (soundWanted && el.paused && gestureTries < 12) {
+      gestureTries++;
+      if (!musicStarted) { musicStarted = true; fadeVolume(CONFIG.musicVolume, CONFIG.musicFadeIn); }
+      tryPlay();
     }
   }
 
-  /* ---------- 爱心参数方程 ---------- */
+  /* ==================== 爱心粒子 ==================== */
   function heartRaw(t) {
     var x = 16 * Math.pow(Math.sin(t), 3);
     var y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
@@ -43627,7 +43759,6 @@ qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
     if (!interacted) {
       interacted = true;
       hintEl.classList.add('hide');
-      if (soundWanted && !musicStarted) { musicStarted = true; playMusic(); }
     }
     if (!CONFIG.interactive) return;
     addBurst(x, y);
@@ -43755,27 +43886,34 @@ qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
   }
 
   function bindEvents() {
-    var down = function (x, y) { onDown(x, y); };
+    /* 轻触爆散 + 播放：pointer / touch / mouse 全覆盖 */
+    var handled = false;
+    var down = function (x, y) {
+      onAnyGesture(null);
+      onDown(x, y);
+    };
+    var onPointer = function (e) { handled = true; down(e.clientX, e.clientY); };
+    var onTouch = function (e) {
+      if (window.PointerEvent) return;
+      for (var i = 0; i < e.changedTouches.length; i++) {
+        var t = e.changedTouches[i];
+        down(t.clientX, t.clientY);
+      }
+    };
+    canvas.addEventListener('pointerdown', onPointer, { passive: true });
+    canvas.addEventListener('touchstart', onTouch, { passive: true });
+    canvas.addEventListener('mousedown', function (e) { if (!handled) down(e.clientX, e.clientY); });
 
-    if (window.PointerEvent) {
-      canvas.addEventListener('pointerdown', function (e) {
-        down(e.clientX, e.clientY);
-      }, { passive: true });
-    } else {
-      canvas.addEventListener('touchstart', function (e) {
-        for (var i = 0; i < e.changedTouches.length; i++) {
-          var t = e.changedTouches[i];
-          down(t.clientX, t.clientY);
-        }
-      }, { passive: true });
-      canvas.addEventListener('mousedown', function (e) {
-        down(e.clientX, e.clientY);
-      });
+    /* 任意手势都尝试解锁/续播音乐（覆盖各家 WebView 差异） */
+    var gEvents = ['pointerdown', 'touchstart', 'touchend', 'mousedown', 'click', 'keydown'];
+    for (var gi = 0; gi < gEvents.length; gi++) {
+      document.addEventListener(gEvents[gi], onAnyGesture, { capture: true, passive: true });
     }
 
     soundBtn.addEventListener('click', function (e) {
       e.stopPropagation();
       if (!interacted) { interacted = true; hintEl.classList.add('hide'); }
+      unlockAudioSession();
       setSound(!soundWanted);
     });
 
@@ -43796,16 +43934,23 @@ qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
     });
     document.addEventListener('visibilitychange', function () {
       if (document.hidden) {
-        if (audio && soundWanted) audio.pause();
+        if (soundWanted) { try { el.pause(); } catch (e2) {} }
       } else {
         started = false;
-        if (audio && soundWanted && musicStarted) {
-          var p = audio.play();
-          if (p && p.catch) p.catch(function () {});
-        }
+        if (soundWanted && musicStarted) tryPlay();
       }
     });
   }
+
+  /* 手动重建音频（调试用）：window.__bgm.retry() */
+  window.__bgm = {
+    element: el,
+    retry: function () { el.dataset.prepared = ''; el.removeAttribute('src'); prepareMusic(); tryPlay(); },
+    state: function () {
+      return { src: srcMode, paused: el.paused, volume: el.volume, readyState: el.readyState,
+               duration: el.duration, currentTime: el.currentTime, error: el.error ? el.error.code : null };
+    }
+  };
 
   buildOutline();
   makeSprites();
@@ -43813,7 +43958,7 @@ qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
   bindEvents();
   requestAnimationFrame(frame);
 
-  setTimeout(function () { buildAudio(); }, 80);
+  setTimeout(prepareMusic, 60);
   setTimeout(function () {
     if (!interacted) hintEl.classList.add('hide');
   }, 9000);
